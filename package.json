@@ -1,0 +1,12 @@
+{
+  "name": "ai-proxy",
+  "version": "1.0.0",
+  "description": "AI API proxy - 5 concurrent requests, fastest for stream, longest for non-stream",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}
