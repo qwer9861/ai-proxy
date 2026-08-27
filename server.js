@@ -8,15 +8,19 @@ const TIMEOUT_MS = 120000;
 function makeRequest(targetUrl, method, headers, body) {
   return new Promise((resolve, reject) => {
     const url = new URL(targetUrl);
+    const reqHeaders = { ...headers };
+    delete reqHeaders.host;
+    delete reqHeaders['content-length'];
+    delete reqHeaders['accept-encoding'];
+    reqHeaders['accept-encoding'] = 'identity';
+    if (body) reqHeaders['content-length'] = Buffer.byteLength(body);
+
     const opts = {
       hostname: url.hostname,
       port: url.port || 443,
       path: url.pathname + url.search,
       method: method,
-      headers: {
-        ...headers,
-        host: url.hostname,
-      },
+      headers: reqHeaders,
       timeout: TIMEOUT_MS,
     };
 
@@ -24,17 +28,26 @@ function makeRequest(targetUrl, method, headers, body) {
       let chunks = [];
       res.on('data', (chunk) => chunks.push(chunk));
       res.on('end', () => {
+        const respBody = Buffer.concat(chunks).toString('utf-8');
+        console.log(`    upstream response: ${res.statusCode}, body length: ${respBody.length}`);
         resolve({
           statusCode: res.statusCode,
           headers: res.headers,
-          body: Buffer.concat(chunks).toString('utf-8'),
+          body: respBody,
         });
       });
-      res.on('error', reject);
+      res.on('error', (e) => {
+        console.log(`    upstream response error: ${e.message}`);
+        reject(e);
+      });
     });
 
-    req.on('error', reject);
+    req.on('error', (e) => {
+      console.log(`    upstream request error: ${e.message}`);
+      reject(e);
+    });
     req.on('timeout', () => {
+      console.log(`    upstream request timeout`);
       req.destroy();
       reject(new Error('Request timeout'));
     });
@@ -44,7 +57,7 @@ function makeRequest(targetUrl, method, headers, body) {
   });
 }
 
-function makeStreamingRequest(targetUrl, method, headers, body, onFirstByte, signal) {
+function makeStreamingRequest(targetUrl, method, headers, body, onResponse, signal) {
   return new Promise((resolve, reject) => {
     const url = new URL(targetUrl);
     const opts = {
@@ -55,21 +68,22 @@ function makeStreamingRequest(targetUrl, method, headers, body, onFirstByte, sig
       headers: {
         ...headers,
         host: url.hostname,
+        'accept-encoding': 'identity',
       },
       timeout: TIMEOUT_MS,
     };
 
     const req = https.request(opts, (res) => {
-      let firstByteReceived = false;
+      // 响应头一到达就回调，由调用方决定是否 pipe
+      const chosen = onResponse(res, req);
       let totalSize = 0;
 
-      res.on('data', (chunk) => {
-        if (!firstByteReceived) {
-          firstByteReceived = true;
-          onFirstByte(res, req);
-        }
-        totalSize += chunk.length;
-      });
+      if (!chosen) {
+        // 没被选中，丢弃数据，等结束
+        res.resume();
+      } else {
+        res.on('data', (chunk) => { totalSize += chunk.length; });
+      }
 
       res.on('end', () => {
         resolve({ statusCode: res.statusCode, totalSize });
@@ -156,15 +170,17 @@ function handleStreaming(req, res, targetUrl, headers, body) {
       headers,
       body,
       (upstreamRes, upstreamReq) => {
-        if (winnerChosen) return;
+        if (winnerChosen) return false;
         winnerChosen = true;
 
         console.log(`  -> Stream winner: request #${i + 1}, status=${upstreamRes.statusCode}`);
 
-        res.writeHead(upstreamRes.statusCode, {
-          ...upstreamRes.headers,
-          connection: 'close',
-        });
+        const streamHeaders = { ...upstreamRes.headers };
+        delete streamHeaders.connection;
+        streamHeaders['x-accel-buffering'] = 'no';
+        streamHeaders['cache-control'] = 'no-cache, no-transform';
+        streamHeaders['x-content-type-options'] = 'nosniff';
+        res.writeHead(upstreamRes.statusCode, streamHeaders);
 
         upstreamRes.pipe(res);
 
@@ -173,6 +189,7 @@ function handleStreaming(req, res, targetUrl, headers, body) {
             c.abort();
           }
         });
+        return true;
       },
       controller.signal
     ).catch((err) => {
@@ -202,12 +219,26 @@ async function handleNonStreaming(req, res, targetUrl, headers, body) {
   }
 
   const results = await Promise.all(promises);
-  const successful = results.filter((r) => r && r.statusCode < 400);
+  const withResponse = results.filter((r) => r !== null);
+  const successful = withResponse.filter((r) => r.statusCode < 400);
 
-  if (successful.length === 0) {
-    const firstError = results.find((r) => r === null);
+  if (withResponse.length === 0) {
     res.writeHead(502, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ error: 'All upstream requests failed or returned errors' }));
+    res.end(JSON.stringify({ error: 'All upstream requests failed (network error)' }));
+    return;
+  }
+
+  // 如果全部是错误响应(>=400)，透传第一个错误响应给客户端
+  if (successful.length === 0) {
+    const firstErr = withResponse[0];
+    console.log(`  -> All ${withResponse.length} requests returned errors, passthrough first: ${firstErr.statusCode}`);
+    const errHeaders = { ...firstErr.headers };
+    delete errHeaders.connection;
+    delete errHeaders['transfer-encoding'];
+    delete errHeaders['content-encoding'];
+    errHeaders['content-length'] = Buffer.byteLength(firstErr.body);
+    res.writeHead(firstErr.statusCode, errHeaders);
+    res.end(firstErr.body);
     return;
   }
 
@@ -225,10 +256,12 @@ async function handleNonStreaming(req, res, targetUrl, headers, body) {
 
   console.log(`  -> Winner: request #${best.index + 1}, words=${bestWords}`);
 
-  res.writeHead(best.statusCode, {
-    ...best.headers,
-    connection: 'close',
-  });
+  const respHeaders = { ...best.headers };
+  delete respHeaders.connection;
+  delete respHeaders['transfer-encoding'];
+  delete respHeaders['content-encoding'];
+  respHeaders['content-length'] = Buffer.byteLength(best.body);
+  res.writeHead(best.statusCode, respHeaders);
   res.end(best.body);
 }
 
