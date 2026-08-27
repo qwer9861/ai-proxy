@@ -1,7 +1,7 @@
 {
   "name": "AI Proxy",
   "image": "mcr.microsoft.com/devcontainers/javascript-node:20",
-  "postAttachCommand": "chmod +x /workspaces/ai-proxy/start.sh && /workspaces/ai-proxy/start.sh",
+  "postCreateCommand": "chmod +x /workspaces/ai-proxy/start.sh && /workspaces/ai-proxy/start.sh",
   "forwardPorts": [8080],
   "portsAttributes": {
     "8080": {
