@@ -1,7 +1,7 @@
 {
   "name": "AI Proxy",
   "image": "mcr.microsoft.com/devcontainers/javascript-node:20",
-  "postStartCommand": "cd /workspaces/ai-proxy && nohup node server.js > /tmp/proxy.log 2>&1 &",
+  "postStartCommand": "cd /workspaces/ai-proxy && nohup node server.js > /tmp/proxy.log 2>&1 & sleep 5 && gh codespace ports visibility 8080:public -c $CODESPACE_NAME > /tmp/port-setup.log 2>&1 || true",
   "forwardPorts": [8080],
   "portsAttributes": {
     "8080": {
